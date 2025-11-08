@@ -1,0 +1,304 @@
+-- =========================================================
+-- Clean drops (order matters because of FKs)
+-- =========================================================
+DROP TABLE IF EXISTS league_pro_player_champion_videos    CASCADE;
+DROP TABLE IF EXISTS league_champion_recommendations      CASCADE;
+DROP TABLE IF EXISTS league_similarity_matches            CASCADE;
+DROP TABLE IF EXISTS league_player_playstyle              CASCADE;
+DROP TABLE IF EXISTS league_playerchapter_matches         CASCADE;
+DROP TABLE IF EXISTS league_player_chapters               CASCADE;
+DROP TABLE IF EXISTS league_player_match_metrics          CASCADE;
+DROP TABLE IF EXISTS league_matches                       CASCADE;
+DROP TABLE IF EXISTS league_pro_players                   CASCADE;
+DROP TABLE IF EXISTS league_players                       CASCADE;
+DROP TABLE IF EXISTS league_champions                     CASCADE;
+DROP TABLE IF EXISTS league_riot_users                    CASCADE;
+
+-- =========================================================
+-- Helpers
+-- =========================================================
+-- Roles as text with CHECKs (keeping flexibility over Postgres ENUM for easy changes)
+-- Allowed player/pro roles: TOP, JUNGLE, MIDDLE, BOTTOM, SUPPORT
+-- Some models also use MID/ADC in comments; we normalize to MIDDLE/BOTTOM here.
+
+-- =========================================================
+-- Champions (minimal 5 fields)
+-- =========================================================
+CREATE TABLE league_champions (
+  id             BIGSERIAL PRIMARY KEY,
+  champion_id    INTEGER       NOT NULL UNIQUE,
+  champion_key   VARCHAR(50)   NOT NULL UNIQUE,
+  name           VARCHAR(100)  NOT NULL,
+  title          VARCHAR(200)  NOT NULL DEFAULT '',
+  image_url      VARCHAR(500)  NOT NULL
+);
+
+CREATE INDEX ix_champions_name ON league_champions(name);
+
+-- =========================================================
+-- RiotUser (no login; Riot ID as PK)
+-- =========================================================
+CREATE TABLE league_riot_users (
+  riot_id         VARCHAR(120) PRIMARY KEY, -- e.g., "gameName#tagLine"
+  region          VARCHAR(10)  NOT NULL,
+  main_role       VARCHAR(20)  NOT NULL,
+  favorite_champion_id BIGINT  NULL REFERENCES league_champions(id) ON DELETE SET NULL,
+  last_seen_at    TIMESTAMPTZ  NULL
+);
+
+CREATE INDEX ix_riot_users_region_mainrole ON league_riot_users(region, main_role);
+ALTER TABLE league_riot_users
+  ADD CONSTRAINT ck_riot_users_main_role
+  CHECK (main_role IN ('TOP','JUNGLE','MIDDLE','BOTTOM','SUPPORT'));
+
+-- =========================================================
+-- Player (Django version of "accounted player", separate from RiotUser)
+-- =========================================================
+CREATE TABLE league_players (
+  id             BIGSERIAL PRIMARY KEY,
+  game_name      VARCHAR(100) NOT NULL,
+  tag_line       VARCHAR(10)  NOT NULL DEFAULT '',
+  puuid          VARCHAR(200) NOT NULL UNIQUE,
+  summoner_id    VARCHAR(200) NULL,
+  region         VARCHAR(10)  NOT NULL,
+  role           VARCHAR(20)  NULL,
+  favorite_champion_id INTEGER NULL,
+  favorite_champion_name VARCHAR(50) NULL,
+  profile_icon_id INTEGER NULL,
+  CONSTRAINT uq_players_name_tag_region UNIQUE (game_name, tag_line, region),
+  CONSTRAINT ck_players_role CHECK (role IS NULL OR role IN ('TOP','JUNGLE','MIDDLE','BOTTOM','SUPPORT'))
+);
+
+CREATE INDEX ix_players_game_name ON league_players(game_name);
+CREATE INDEX ix_players_region ON league_players(region);
+
+-- =========================================================
+-- ProPlayer
+-- =========================================================
+CREATE TABLE league_pro_players (
+  id         BIGSERIAL PRIMARY KEY,
+  name       VARCHAR(100) NOT NULL,
+  team       VARCHAR(100) NULL,
+  region     VARCHAR(10)  NOT NULL,
+  role       VARCHAR(20)  NOT NULL,
+  profile_icon_id INTEGER NULL,
+  puuid      VARCHAR(200) NULL UNIQUE,
+  game_name  VARCHAR(100) NULL,
+  tag_line   VARCHAR(10)  NULL,
+  CONSTRAINT ck_pro_role CHECK (role IN ('TOP','JUNGLE','MIDDLE','BOTTOM','SUPPORT'))
+);
+
+CREATE INDEX ix_pro_players_region_role ON league_pro_players(region, role);
+
+-- =========================================================
+-- Match (raw)
+-- =========================================================
+CREATE TABLE league_matches (
+  id              BIGSERIAL PRIMARY KEY,
+  match_id        VARCHAR(100) NOT NULL UNIQUE,
+  player_id       BIGINT       NOT NULL REFERENCES league_players(id) ON DELETE CASCADE,
+  raw_data        JSONB        NOT NULL DEFAULT '{}'::jsonb,
+  match_timestamp BIGINT       NOT NULL, -- epoch ms or s (as you store)
+  is_processed    BOOLEAN      NOT NULL DEFAULT FALSE
+);
+
+CREATE INDEX ix_matches_timestamp ON league_matches(match_timestamp);
+CREATE INDEX ix_matches_player_ts ON league_matches(player_id, match_timestamp DESC);
+
+-- =========================================================
+-- PlayerMatchMetrics (processed per match)
+-- =========================================================
+CREATE TABLE league_player_match_metrics (
+  id                       BIGSERIAL PRIMARY KEY,
+  match_id                 BIGINT  NOT NULL UNIQUE REFERENCES league_matches(id) ON DELETE CASCADE,
+  player_id                BIGINT  NOT NULL REFERENCES league_players(id) ON DELETE CASCADE,
+
+  champion_id              INTEGER NOT NULL,
+  champion_name            VARCHAR(50) NOT NULL,
+  role                     VARCHAR(20) NULL,   -- TOP, JUNGLE, MIDDLE, BOTTOM, SUPPORT
+  lane                     VARCHAR(20) NULL,   -- TOP, JUNGLE, MIDDLE, BOTTOM
+
+  cs_per_min               DOUBLE PRECISION NULL,
+  gold_per_min             DOUBLE PRECISION NULL,
+  damage_per_min           DOUBLE PRECISION NULL,
+  damage_share             DOUBLE PRECISION NULL,
+  kill_participation       DOUBLE PRECISION NULL,
+
+  kills                    INTEGER NOT NULL DEFAULT 0,
+  deaths                   INTEGER NOT NULL DEFAULT 0,
+  assists                  INTEGER NOT NULL DEFAULT 0,
+  kda_ratio                DOUBLE PRECISION NULL,
+
+  win                      BOOLEAN NOT NULL DEFAULT FALSE,
+  team_id                  INTEGER NULL, -- 100 or 200
+  participant_id           SMALLINT NULL,
+  game_duration            INTEGER NULL,
+
+  vision_score             INTEGER NULL,
+  vision_score_per_min     DOUBLE PRECISION NULL,
+  gold_earned              INTEGER NULL,
+  total_damage_dealt       INTEGER NULL,
+  total_damage_taken       INTEGER NULL,
+  total_heal               INTEGER NULL,
+  total_minions_killed     INTEGER NULL,
+  neutral_minions_killed   INTEGER NULL,
+  wards_placed             INTEGER NULL,
+  wards_killed             INTEGER NULL,
+  first_blood              BOOLEAN NOT NULL DEFAULT FALSE,
+  first_blood_assist       BOOLEAN NOT NULL DEFAULT FALSE,
+  first_tower              BOOLEAN NOT NULL DEFAULT FALSE,
+  first_tower_assist       BOOLEAN NOT NULL DEFAULT FALSE,
+
+  items                    INTEGER[7] NULL,
+  summoner_spells          VARCHAR(30)[2] NULL,
+  rune_setup               JSONB NULL,
+  skill_order              VARCHAR(5)[18] NULL,
+  damage_breakdown         JSONB NULL,
+  objective_contribution   JSONB NULL,
+  analysis_json            JSONB NULL,
+
+  match_recorded_at        BIGINT NOT NULL,  -- = match_timestamp for indexing (naming clearer)
+  CONSTRAINT ck_metrics_damage_share CHECK (damage_share IS NULL OR (damage_share >= 0 AND damage_share <= 1)),
+  CONSTRAINT ck_metrics_kp CHECK (kill_participation IS NULL OR (kill_participation >= 0 AND kill_participation <= 1)),
+  CONSTRAINT ck_metrics_role CHECK (role IS NULL OR role IN ('TOP','JUNGLE','MIDDLE','BOTTOM','SUPPORT'))
+);
+
+-- Indexes
+CREATE INDEX ix_metrics_player_ts ON league_player_match_metrics(player_id, match_recorded_at DESC);
+CREATE INDEX ix_metrics_champion_id ON league_player_match_metrics(champion_id);
+CREATE INDEX ix_metrics_role ON league_player_match_metrics(role);
+CREATE INDEX ix_metrics_win ON league_player_match_metrics(win);
+
+-- =========================================================
+-- PlayerChapter (journey)
+-- =========================================================
+CREATE TABLE league_player_chapters (
+  id                BIGSERIAL PRIMARY KEY,
+  player_id         BIGINT NOT NULL REFERENCES league_players(id) ON DELETE CASCADE,
+  chapter_index     INTEGER NOT NULL,
+  season            INTEGER NOT NULL DEFAULT 2025,
+
+  start_date        DATE    NOT NULL,
+  end_date          DATE    NOT NULL,
+
+  start_game_idx    INTEGER NOT NULL,
+  end_game_idx      INTEGER NOT NULL,
+
+  title             VARCHAR(200) NOT NULL,
+  summary           TEXT NOT NULL,
+
+  top_champion_id   INTEGER NOT NULL,
+  top_champion_name VARCHAR(50) NOT NULL,
+  top_champion_icon_url VARCHAR(500) NULL,
+  top_champion_games INTEGER NOT NULL DEFAULT 0,
+
+  games_count       INTEGER NOT NULL DEFAULT 0,
+  win_rate          DOUBLE PRECISION NOT NULL,
+  kda_score         DOUBLE PRECISION NOT NULL,
+  cs_score          DOUBLE PRECISION NOT NULL,
+  damage_score      DOUBLE PRECISION NOT NULL,
+  vision_score      DOUBLE PRECISION NOT NULL,
+
+  raw_metrics       JSONB NULL,
+
+  CONSTRAINT uq_chapter_unique_per_player_season UNIQUE (player_id, chapter_index, season),
+  CONSTRAINT ck_chapter_rates CHECK (
+    win_rate BETWEEN 0 AND 1
+    AND kda_score BETWEEN 0 AND 100
+    AND cs_score BETWEEN 0 AND 100
+    AND damage_score BETWEEN 0 AND 100
+    AND vision_score BETWEEN 0 AND 100
+  )
+);
+
+-- M2M: chapters ↔ matches
+CREATE TABLE league_playerchapter_matches (
+  id           BIGSERIAL PRIMARY KEY,
+  chapter_id   BIGINT NOT NULL REFERENCES league_player_chapters(id) ON DELETE CASCADE,
+  match_id     BIGINT NOT NULL REFERENCES league_matches(id) ON DELETE CASCADE,
+  CONSTRAINT uq_chapter_match UNIQUE (chapter_id, match_id)
+);
+
+-- =========================================================
+-- PlayerPlaystyle (one of player or pro_player)
+-- =========================================================
+CREATE TABLE league_player_playstyle (
+  id                  BIGSERIAL PRIMARY KEY,
+  player_id           BIGINT NULL UNIQUE REFERENCES league_players(id) ON DELETE CASCADE,
+  pro_player_id       BIGINT NULL UNIQUE REFERENCES league_pro_players(id) ON DELETE CASCADE,
+
+  aggressiveness      DOUBLE PRECISION NULL,
+  team_focus          DOUBLE PRECISION NULL,
+  objective_control   DOUBLE PRECISION NULL,
+  vision_control      DOUBLE PRECISION NULL,
+  farm_efficiency     DOUBLE PRECISION NULL,
+  late_game_scaling   DOUBLE PRECISION NULL,
+
+  playstyle_summary   TEXT NULL,
+  raw_metrics         JSONB NULL,
+
+  -- Enforce "exactly one" linkage (optional: comment out if you want looser rule)
+  CONSTRAINT ck_playstyle_one_subject CHECK (
+    (player_id IS NOT NULL AND pro_player_id IS NULL) OR
+    (player_id IS NULL AND pro_player_id IS NOT NULL)
+  ),
+
+  CONSTRAINT ck_playstyle_scores CHECK (
+    (aggressiveness IS NULL OR (aggressiveness BETWEEN 0 AND 100)) AND
+    (team_focus IS NULL OR (team_focus BETWEEN 0 AND 100)) AND
+    (objective_control IS NULL OR (objective_control BETWEEN 0 AND 100)) AND
+    (vision_control IS NULL OR (vision_control BETWEEN 0 AND 100)) AND
+    (farm_efficiency IS NULL OR (farm_efficiency BETWEEN 0 AND 100)) AND
+    (late_game_scaling IS NULL OR (late_game_scaling BETWEEN 0 AND 100))
+  )
+);
+
+-- =========================================================
+-- SimilarityMatch (player ↔ pro_player)
+-- =========================================================
+CREATE TABLE league_similarity_matches (
+  id                BIGSERIAL PRIMARY KEY,
+  player_id         BIGINT NOT NULL REFERENCES league_players(id) ON DELETE CASCADE,
+  pro_player_id     BIGINT NOT NULL REFERENCES league_pro_players(id) ON DELETE CASCADE,
+  similarity_score  DOUBLE PRECISION NOT NULL,
+  feature_explanation TEXT NULL,
+  CONSTRAINT uq_similarity_pair UNIQUE (player_id, pro_player_id),
+  CONSTRAINT ck_similarity_score CHECK (similarity_score BETWEEN 0 AND 1)
+);
+
+CREATE INDEX ix_similarity_player_score ON league_similarity_matches(player_id, similarity_score DESC);
+CREATE INDEX ix_similarity_pro_score    ON league_similarity_matches(pro_player_id, similarity_score DESC);
+
+-- =========================================================
+-- ChampionRecommendation (Top 1~3 per player)
+-- =========================================================
+CREATE TABLE league_champion_recommendations (
+  id              BIGSERIAL PRIMARY KEY,
+  player_id       BIGINT NOT NULL REFERENCES league_players(id) ON DELETE CASCADE,
+  champion_id     INTEGER NOT NULL,
+  champion_name   VARCHAR(50) NOT NULL,
+  champion_icon_url VARCHAR(500) NULL,
+  reason          TEXT NOT NULL,
+  rank            INTEGER NOT NULL,
+  CONSTRAINT uq_reco_player_rank UNIQUE (player_id, rank),
+  CONSTRAINT ck_reco_rank_range CHECK (rank BETWEEN 1 AND 3)
+);
+
+-- =========================================================
+-- ProPlayerChampionVideo
+-- =========================================================
+CREATE TABLE league_pro_player_champion_videos (
+  id            BIGSERIAL PRIMARY KEY,
+  player_id     BIGINT NOT NULL REFERENCES league_players(id) ON DELETE CASCADE,
+  pro_player_id BIGINT NOT NULL REFERENCES league_pro_players(id) ON DELETE CASCADE,
+  champion_id   INTEGER NOT NULL,
+  champion_name VARCHAR(50) NOT NULL,
+  video_url     VARCHAR(500) NOT NULL,
+  video_title   VARCHAR(200) NULL,
+  match_id      VARCHAR(100) NULL,
+  key_points    TEXT NOT NULL,
+  focus_areas   TEXT NOT NULL
+);
+
+CREATE INDEX ix_videos_player_champion   ON league_pro_player_champion_videos(player_id, champion_id);
+CREATE INDEX ix_videos_pro_champion      ON league_pro_player_champion_videos(pro_player_id, champion_id);

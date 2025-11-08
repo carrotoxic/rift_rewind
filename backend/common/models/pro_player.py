@@ -1,31 +1,20 @@
-from django.db import models
+from __future__ import annotations
+from dataclasses import dataclass, field
+from typing import Optional, List, Dict, Any
+from datetime import datetime
 
-
-#Question: shall we make abstract class for Player and ProPlayer?
-class ProPlayer(models.Model):
-    """Professional League of Legends players for similarity matching"""
-    
-    # Player information
-    name = models.CharField(max_length=100, db_index=True)
-    team = models.CharField(max_length=100, null=True, blank=True)
-    region = models.CharField(max_length=10)  # e.g., 'NA1', 'KR', 'EUW1'
-    role = models.CharField(max_length=20)  # TOP, JUNGLE, MID, ADC, SUPPORT
-
-    # Profile
-    profile_icon_id = models.IntegerField(null=True, blank=True)  # For displaying pro player image
-    
-    # Riot identifiers (if available)
-    puuid = models.CharField(max_length=200, null=True, blank=True, unique=True)
-    game_name = models.CharField(max_length=100, null=True, blank=True)
-    tag_line = models.CharField(max_length=10, null=True, blank=True)
-    
-    class Meta:
-        db_table = "league_pro_players"
-        indexes = [
-            models.Index(fields=["region", "role"]),
-        ]
-    
-    def __str__(self):
-        team_str = f" ({self.team})" if self.team else ""
-        return f"{self.name}{team_str} - {self.role}"
+# =========================================================
+# ProPlayer (league_pro_players)
+# =========================================================
+@dataclass
+class ProPlayer:
+    id: Optional[int]
+    name: str
+    team: Optional[str]
+    region: str
+    role: str                              # enum set
+    profile_icon_id: Optional[int] = None
+    puuid: Optional[str] = None            # UNIQUE, nullable
+    game_name: Optional[str] = None
+    tag_line: Optional[str] = None
 
