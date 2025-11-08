@@ -9,7 +9,6 @@ class Match(models.Model):
     player = models.ForeignKey(Player, on_delete=models.CASCADE, related_name="matches")
     raw_data = models.JSONField(default=dict)  # Full match data from API
     match_timestamp = models.BigIntegerField(db_index=True)  # For ordering/querying
-    is_processed = models.BooleanField(default=False)
     
     class Meta:
         db_table = "league_matches"
