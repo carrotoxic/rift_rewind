@@ -1,20 +1,17 @@
-from django.db import models
+from __future__ import annotations
+from dataclasses import dataclass, field
+from typing import Optional, List, Dict, Any
+from datetime import datetime
 
 
-class Champion(models.Model):
-    """Basic static champion information (LoL)"""
-
-    champion_id = models.IntegerField(unique=True, db_index=True)
-    champion_key = models.CharField(max_length=50, unique=True, db_index=True)
-    name = models.CharField(max_length=100)
-    title = models.CharField(max_length=200, blank=True)
-    image_url = models.URLField(max_length=500)
-
-    class Meta:
-        db_table = "league_champions"
-        indexes = [
-            models.Index(fields=["name"]),
-        ]
-
-    def __str__(self):
-        return self.name
+# =========================================================
+# Champion (league_champions)
+# =========================================================
+@dataclass
+class Champion:
+    id: Optional[int]                     # BIGSERIAL PK (DB 생성)
+    champion_id: int                      # UNIQUE
+    champion_key: str                     # UNIQUE
+    name: str
+    title: str = ""
+    image_url: str = ""
